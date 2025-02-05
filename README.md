@@ -10,3 +10,9 @@ pinned: false
 ---
 
 Check out the configuration reference at https://huggingface.co/docs/hub/spaces-config-reference
+
+## Download Models
+```sh
+# The models are moved to GoogleDrive to avoid placing large files in GitHub.
+cp -r ~/workspace/models/cgrkzexw-599808 ./cgrkzexw-599808
+```
