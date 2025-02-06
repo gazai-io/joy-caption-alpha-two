@@ -9,6 +9,8 @@ import torch.amp.autocast_mode
 from PIL import Image
 import os
 import torchvision.transforms.functional as TVF
+import zipfile
+from datetime import datetime
 
 
 CLIP_PATH = "google/siglip-so400m-patch14-384"
@@ -158,8 +160,17 @@ image_adapter.to("cuda")
 
 @spaces.GPU()
 @torch.no_grad()
-def stream_chat(input_image: Image.Image, caption_type: str, caption_length: str | int, extra_options: list[str], name_input: str, custom_prompt: str) -> tuple[str, str]:
+def stream_chat(input_image: str, input_image_paths: list[str], caption_type: str, caption_length: str | int, extra_options: list[str], name_input: str, custom_prompt: str) -> tuple[str, str, str]:
+	if input_image is None and (input_image_paths is None or len(input_image_paths) == 0):
+		return None, None, None
+
 	torch.cuda.empty_cache()
+
+	if input_image is not None:
+		input_images = [Image.open(input_image)]
+	else:
+		# Load input_images path to PIL
+		input_images = [Image.open(image_path) for image_path in input_image_paths]
 
 	# 'any' means no length specified
 	length = None if caption_length == "any" else caption_length
@@ -195,91 +206,126 @@ def stream_chat(input_image: Image.Image, caption_type: str, caption_length: str
 	# For debugging
 	print(f"Prompt: {prompt_str}")
 
-	# Preprocess image
-	# NOTE: I found the default processor for so400M to have worse results than just using PIL directly
-	#image = clip_processor(images=input_image, return_tensors='pt').pixel_values
-	image = input_image.resize((384, 384), Image.LANCZOS)
-	pixel_values = TVF.pil_to_tensor(image).unsqueeze(0) / 255.0
-	pixel_values = TVF.normalize(pixel_values, [0.5], [0.5])
-	pixel_values = pixel_values.to('cuda')
+	file_name_caption_map = {}
 
-	# Embed image
-	# This results in Batch x Image Tokens x Features
-	with torch.amp.autocast_mode.autocast('cuda', enabled=True):
-		vision_outputs = clip_model(pixel_values=pixel_values, output_hidden_states=True)
-		embedded_images = image_adapter(vision_outputs.hidden_states)
-		embedded_images = embedded_images.to('cuda')
-	
-	# Build the conversation
-	convo = [
-		{
-			"role": "system",
-			"content": "You are a helpful image captioner.",
-		},
-		{
-			"role": "user",
-			"content": prompt_str,
-		},
-	]
+	for origin_image in input_images:
+		# Preprocess image
+		# NOTE: I found the default processor for so400M to have worse results than just using PIL directly
+		#image = clip_processor(images=input_image, return_tensors='pt').pixel_values
+		image = origin_image.resize((384, 384), Image.LANCZOS)
+		pixel_values = TVF.pil_to_tensor(image).unsqueeze(0) / 255.0
+		pixel_values = TVF.normalize(pixel_values, [0.5], [0.5])
+		pixel_values = pixel_values.to('cuda')
 
-	# Format the conversation
-	convo_string = tokenizer.apply_chat_template(convo, tokenize = False, add_generation_prompt = True)
-	assert isinstance(convo_string, str)
+		# Embed image
+		# This results in Batch x Image Tokens x Features
+		with torch.amp.autocast_mode.autocast('cuda', enabled=True):
+			vision_outputs = clip_model(pixel_values=pixel_values, output_hidden_states=True)
+			embedded_images = image_adapter(vision_outputs.hidden_states)
+			embedded_images = embedded_images.to('cuda')
+		
+		# Build the conversation
+		convo = [
+			{
+				"role": "system",
+				"content": "You are a helpful image captioner.",
+			},
+			{
+				"role": "user",
+				"content": prompt_str,
+			},
+		]
 
-	# Tokenize the conversation
-	# prompt_str is tokenized separately so we can do the calculations below
-	convo_tokens = tokenizer.encode(convo_string, return_tensors="pt", add_special_tokens=False, truncation=False)
-	prompt_tokens = tokenizer.encode(prompt_str, return_tensors="pt", add_special_tokens=False, truncation=False)
-	assert isinstance(convo_tokens, torch.Tensor) and isinstance(prompt_tokens, torch.Tensor)
-	convo_tokens = convo_tokens.squeeze(0)   # Squeeze just to make the following easier
-	prompt_tokens = prompt_tokens.squeeze(0)
+		# Format the conversation
+		convo_string = tokenizer.apply_chat_template(convo, tokenize = False, add_generation_prompt = True)
+		assert isinstance(convo_string, str)
 
-	# Calculate where to inject the image
-	eot_id_indices = (convo_tokens == tokenizer.convert_tokens_to_ids("<|eot_id|>")).nonzero(as_tuple=True)[0].tolist()
-	assert len(eot_id_indices) == 2, f"Expected 2 <|eot_id|> tokens, got {len(eot_id_indices)}"
+		# Tokenize the conversation
+		# prompt_str is tokenized separately so we can do the calculations below
+		convo_tokens = tokenizer.encode(convo_string, return_tensors="pt", add_special_tokens=False, truncation=False)
+		prompt_tokens = tokenizer.encode(prompt_str, return_tensors="pt", add_special_tokens=False, truncation=False)
+		assert isinstance(convo_tokens, torch.Tensor) and isinstance(prompt_tokens, torch.Tensor)
+		convo_tokens = convo_tokens.squeeze(0)   # Squeeze just to make the following easier
+		prompt_tokens = prompt_tokens.squeeze(0)
 
-	preamble_len = eot_id_indices[1] - prompt_tokens.shape[0]   # Number of tokens before the prompt
+		# Calculate where to inject the image
+		eot_id_indices = (convo_tokens == tokenizer.convert_tokens_to_ids("<|eot_id|>")).nonzero(as_tuple=True)[0].tolist()
+		assert len(eot_id_indices) == 2, f"Expected 2 <|eot_id|> tokens, got {len(eot_id_indices)}"
 
-	# Embed the tokens
-	convo_embeds = text_model.model.embed_tokens(convo_tokens.unsqueeze(0).to('cuda'))
+		preamble_len = eot_id_indices[1] - prompt_tokens.shape[0]   # Number of tokens before the prompt
 
-	# Construct the input
-	input_embeds = torch.cat([
-		convo_embeds[:, :preamble_len],   # Part before the prompt
-		embedded_images.to(dtype=convo_embeds.dtype),   # Image
-		convo_embeds[:, preamble_len:],   # The prompt and anything after it
-	], dim=1).to('cuda')
+		# Embed the tokens
+		convo_embeds = text_model.model.embed_tokens(convo_tokens.unsqueeze(0).to('cuda'))
 
-	input_ids = torch.cat([
-		convo_tokens[:preamble_len].unsqueeze(0),
-		torch.zeros((1, embedded_images.shape[1]), dtype=torch.long),   # Dummy tokens for the image (TODO: Should probably use a special token here so as not to confuse any generation algorithms that might be inspecting the input)
-		convo_tokens[preamble_len:].unsqueeze(0),
-	], dim=1).to('cuda')
-	attention_mask = torch.ones_like(input_ids)
+		# Construct the input
+		input_embeds = torch.cat([
+			convo_embeds[:, :preamble_len],   # Part before the prompt
+			embedded_images.to(dtype=convo_embeds.dtype),   # Image
+			convo_embeds[:, preamble_len:],   # The prompt and anything after it
+		], dim=1).to('cuda')
 
-	# Debugging
-	print(f"Input to model: {repr(tokenizer.decode(input_ids[0]))}")
+		input_ids = torch.cat([
+			convo_tokens[:preamble_len].unsqueeze(0),
+			torch.zeros((1, embedded_images.shape[1]), dtype=torch.long),   # Dummy tokens for the image (TODO: Should probably use a special token here so as not to confuse any generation algorithms that might be inspecting the input)
+			convo_tokens[preamble_len:].unsqueeze(0),
+		], dim=1).to('cuda')
+		attention_mask = torch.ones_like(input_ids)
 
-	#generate_ids = text_model.generate(input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask, max_new_tokens=300, do_sample=False, suppress_tokens=None)
-	#generate_ids = text_model.generate(input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask, max_new_tokens=300, do_sample=True, top_k=10, temperature=0.5, suppress_tokens=None)
-	generate_ids = text_model.generate(input_ids, inputs_embeds=input_embeds, attention_mask=attention_mask, max_new_tokens=300, do_sample=True, suppress_tokens=None)   # Uses the default which is temp=0.6, top_p=0.9
+		# Debugging
+		print(f"Input to model: {repr(tokenizer.decode(input_ids[0]))}")
 
-	# Trim off the prompt
-	generate_ids = generate_ids[:, input_ids.shape[1]:]
-	if generate_ids[0][-1] == tokenizer.eos_token_id or generate_ids[0][-1] == tokenizer.convert_tokens_to_ids("<|eot_id|>"):
-		generate_ids = generate_ids[:, :-1]
+		#generate_ids = text_model.generate(input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask, max_new_tokens=300, do_sample=False, suppress_tokens=None)
+		#generate_ids = text_model.generate(input_ids, inputs_embeds=inputs_embeds, attention_mask=attention_mask, max_new_tokens=300, do_sample=True, top_k=10, temperature=0.5, suppress_tokens=None)
+		generate_ids = text_model.generate(input_ids, inputs_embeds=input_embeds, attention_mask=attention_mask, max_new_tokens=300, do_sample=True, suppress_tokens=None)   # Uses the default which is temp=0.6, top_p=0.9
 
-	caption = tokenizer.batch_decode(generate_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False)[0]
+		# Trim off the prompt
+		generate_ids = generate_ids[:, input_ids.shape[1]:]
+		if generate_ids[0][-1] == tokenizer.eos_token_id or generate_ids[0][-1] == tokenizer.convert_tokens_to_ids("<|eot_id|>"):
+			generate_ids = generate_ids[:, :-1]
 
-	return prompt_str, caption.strip()
+		caption = tokenizer.batch_decode(generate_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False)[0]
+		file_name_caption_map[os.path.splitext(os.path.basename(origin_image.filename))[0]] = caption.strip()
 
+	# Create a zip file to store the captions
+	if not os.path.exists(os.path.join("downloads")):
+		os.makedirs(os.path.join("downloads"))
+	zip_file_path = os.path.join("downloads", f"{datetime.now().strftime('%Y-%m-%d_%H-%M-%S')}_captions.zip")
+	with zipfile.ZipFile(zip_file_path, 'w') as zipf:
+		for filename, caption in file_name_caption_map.items():
+			# Create a text file for each caption
+			caption_file_name = f"{filename}_caption.txt"
+			caption_file_path = os.path.join("downloads", caption_file_name)
+			with open(caption_file_path, 'w') as f:
+				f.write(caption)
+			# Add the caption file to the zip
+			zipf.write(caption_file_path, caption_file_name)
+			# Remove the temporary caption file
+			os.remove(caption_file_path)
+
+	output_caption_path = zip_file_path
+
+	if len(file_name_caption_map) == 1:
+		caption_output = list(file_name_caption_map.values())[0].strip()
+	else:
+		caption_output = "\n\n".join([f"[{filename}]:\n{caption.strip()}" for filename, caption in file_name_caption_map.items()])
+
+	return prompt_str, caption_output, output_caption_path
 
 with gr.Blocks() as demo:
 	gr.HTML(TITLE)
 
 	with gr.Row():
 		with gr.Column():
-			input_image = gr.Image(type="pil", label="Input Image")
+			batch_mode = gr.Checkbox(label="Batch Mode (Upload multiple images to caption them all at once)", value=False)
+
+			input_images = gr.Files(label="Input Images", file_types=["image"], visible=False)
+			input_image = gr.Image(type="filepath", label="Input Image", visible=True)
+
+			batch_mode.change(
+				fn=lambda x: (gr.update(visible=x, value=None), gr.update(visible=not x, value=None)),
+				inputs=[batch_mode],
+				outputs=[input_images, input_image]
+			)
 
 			caption_type = gr.Dropdown(
 				choices=["Descriptive", "Descriptive (Informal)", "Training Prompt", "MidJourney", "Booru tag list", "Booru-like tag list", "Art Critic", "Product Listing", "Social Media Post"],
@@ -328,8 +374,10 @@ with gr.Blocks() as demo:
 		with gr.Column():
 			output_prompt = gr.Textbox(label="Prompt that was used")
 			output_caption = gr.Textbox(label="Caption")
+
+			download_packed = gr.DownloadButton(label="Download Captions (packed)")
 	
-	run_button.click(fn=stream_chat, inputs=[input_image, caption_type, caption_length, extra_options, name_input, custom_prompt], outputs=[output_prompt, output_caption])
+	run_button.click(fn=stream_chat, inputs=[input_image, input_images, caption_type, caption_length, extra_options, name_input, custom_prompt], outputs=[output_prompt, output_caption, download_packed])
 
 
 if __name__ == "__main__":
