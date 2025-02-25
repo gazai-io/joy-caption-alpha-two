@@ -171,7 +171,7 @@ def stream_chat(input_image: str, input_image_paths: list[str], caption_type: st
 	
 	if input_image_paths is not None and len(input_image_paths) > 0:
 		# Load input_images path to PIL
-		input_images = [Image.open(image_path) for image_path in input_image_paths]
+		input_images = [Image.open(image_path).convert("RGB") for image_path in input_image_paths]
 
 	# 'any' means no length specified
 	length = None if caption_length == "any" else caption_length
