@@ -171,7 +171,7 @@ def stream_chat(input_image: str, input_image_paths: list[str], caption_type: st
 	
 	if input_image_paths is not None and len(input_image_paths) > 0:
 		# Load input_images path to PIL
-		input_images = [Image.open(image_path).convert("RGB") for image_path in input_image_paths]
+		input_images = [Image.open(image_path) for image_path in input_image_paths]
 
 	# 'any' means no length specified
 	length = None if caption_length == "any" else caption_length
@@ -214,7 +214,7 @@ def stream_chat(input_image: str, input_image_paths: list[str], caption_type: st
 		# NOTE: I found the default processor for so400M to have worse results than just using PIL directly
 		#image = clip_processor(images=input_image, return_tensors='pt').pixel_values
 		image = origin_image.resize((384, 384), Image.LANCZOS)
-		pixel_values = TVF.pil_to_tensor(image).unsqueeze(0) / 255.0
+		pixel_values = TVF.pil_to_tensor(image.convert("RGB")).unsqueeze(0) / 255.0
 		pixel_values = TVF.normalize(pixel_values, [0.5], [0.5])
 		pixel_values = pixel_values.to('cuda')
 
