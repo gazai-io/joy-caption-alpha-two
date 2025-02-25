@@ -28,10 +28,10 @@ cd /home/gazai/MyPrograms/joy-caption-alpha-two
 # Get the PID of the Python process
 APP_PID=$!
 
-# Schedule shutdown after 5 minutes (300 seconds)
+# Schedule shutdown after 10 minutes (600 seconds)
 (
-    sleep 300
-    echo "Shutting down the server after 5 minutes..."
+    sleep 600
+    echo "Shutting down the server after 10 minutes..."
     kill $APP_PID
     rm -f "$PIDFILE"
 ) &
