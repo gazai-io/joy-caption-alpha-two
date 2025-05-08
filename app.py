@@ -160,11 +160,24 @@ image_adapter.to("cuda")
 
 @spaces.GPU()
 @torch.no_grad()
-def stream_chat(input_image: str, input_image_paths: list[str], caption_type: str, caption_length: str | int, extra_options: list[str], name_input: str, custom_prompt: str, prefix_caption: str) -> tuple[str, str, str]:
+def stream_chat(input_image: str, input_image_paths: list[str], caption_type: str, caption_length: str | int, extra_options: list[str], name_input: str, custom_prompt: str, prefix_caption: str, local_path: str) -> tuple[str, str, str]:
 	if input_image is None and (input_image_paths is None or len(input_image_paths) == 0):
 		return None, None, None
 
 	torch.cuda.empty_cache()
+
+	if local_path is not None and local_path != "":
+		local_path = Path(local_path)
+		if not local_path.exists():
+			raise FileNotFoundError(f"Locale path {local_path} does not exist")
+
+		input_images = []
+		for file in local_path.iterdir():
+			if file.suffix.lower() in ['.png', '.jpg', '.jpeg', '.webp']:
+				try:
+					input_images.append(Image.open(file))
+				except Exception as e:
+					print(f"Error loading image {file}: {e}")
 
 	if input_image is not None:
 		input_images = [Image.open(input_image)]
@@ -319,13 +332,23 @@ with gr.Blocks() as demo:
 		with gr.Column():
 			batch_mode = gr.Checkbox(label="Batch Mode (Upload multiple images to caption them all at once)", value=False)
 
+			load_from_server = gr.Checkbox(label="Load from Server (Load images from a server instead of uploading them)", value=False)
+
 			input_images = gr.Files(label="Input Images", file_types=["image"], visible=False)
 			input_image = gr.Image(type="filepath", label="Input Image", visible=True)
 
+			local_path = gr.Textbox(label="Locale Path (Path to the locale file to load images from)", visible=False)
+
 			batch_mode.change(
-				fn=lambda x: (gr.update(visible=x, value=None), gr.update(visible=not x, value=None)),
+				fn=lambda x: (gr.update(visible=x, value=None), gr.update(visible=not x, value=None), gr.update(visible=False, value=None)),
 				inputs=[batch_mode],
-				outputs=[input_images, input_image]
+				outputs=[input_images, input_image, local_path]
+			)
+
+			load_from_server.change(
+				fn=lambda x: (gr.update(visible=False, value=None), gr.update(visible=False, value=None), gr.update(visible=True, value=None)),
+				inputs=[load_from_server],
+				outputs=[input_images, input_image, local_path]
 			)
 
 			caption_type = gr.Dropdown(
@@ -380,7 +403,7 @@ with gr.Blocks() as demo:
 
 			download_packed = gr.DownloadButton(label="Download Captions (packed)")
 	
-	run_button.click(fn=stream_chat, inputs=[input_image, input_images, caption_type, caption_length, extra_options, name_input, custom_prompt, prefix_caption], outputs=[output_prompt, output_caption, download_packed])
+	run_button.click(fn=stream_chat, inputs=[input_image, input_images, caption_type, caption_length, extra_options, name_input, custom_prompt, prefix_caption, local_path], outputs=[output_prompt, output_caption, download_packed])
 
 
 if __name__ == "__main__":
