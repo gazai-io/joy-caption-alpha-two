@@ -294,7 +294,7 @@ def stream_chat(input_image: str, input_image_paths: list[str], caption_type: st
 	with zipfile.ZipFile(zip_file_path, 'w') as zipf:
 		for filename, caption in file_name_caption_map.items():
 			# Create a text file for each caption
-			caption_file_name = f"{filename}_caption.txt"
+			caption_file_name = f"{filename}.txt"
 			caption_file_path = os.path.join("downloads", caption_file_name)
 			with open(caption_file_path, 'w') as f:
 				f.write(caption)
