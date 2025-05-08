@@ -160,7 +160,7 @@ image_adapter.to("cuda")
 
 @spaces.GPU()
 @torch.no_grad()
-def stream_chat(input_image: str, input_image_paths: list[str], caption_type: str, caption_length: str | int, extra_options: list[str], name_input: str, custom_prompt: str) -> tuple[str, str, str]:
+def stream_chat(input_image: str, input_image_paths: list[str], caption_type: str, caption_length: str | int, extra_options: list[str], name_input: str, custom_prompt: str, prefix_caption: str) -> tuple[str, str, str]:
 	if input_image is None and (input_image_paths is None or len(input_image_paths) == 0):
 		return None, None, None
 
@@ -285,7 +285,7 @@ def stream_chat(input_image: str, input_image_paths: list[str], caption_type: st
 			generate_ids = generate_ids[:, :-1]
 
 		caption = tokenizer.batch_decode(generate_ids, skip_special_tokens=False, clean_up_tokenization_spaces=False)[0]
-		file_name_caption_map[os.path.splitext(os.path.basename(origin_image.filename))[0]] = caption.strip()
+		file_name_caption_map[os.path.splitext(os.path.basename(origin_image.filename))[0]] = prefix_caption + caption.strip()
 
 	# Create a zip file to store the captions
 	if not os.path.exists(os.path.join("downloads")):
@@ -370,6 +370,8 @@ with gr.Blocks() as demo:
 			custom_prompt = gr.Textbox(label="Custom Prompt (optional, will override all other settings)")
 			gr.Markdown("**Note:** Alpha Two is not a general instruction follower and will not follow prompts outside its training data well. Use this feature with caution.")
 
+			prefix_caption = gr.Textbox(label="Prefix Caption (optional, will be added to the beginning of the caption)")
+
 			run_button = gr.Button("Caption")
 		
 		with gr.Column():
@@ -378,7 +380,7 @@ with gr.Blocks() as demo:
 
 			download_packed = gr.DownloadButton(label="Download Captions (packed)")
 	
-	run_button.click(fn=stream_chat, inputs=[input_image, input_images, caption_type, caption_length, extra_options, name_input, custom_prompt], outputs=[output_prompt, output_caption, download_packed])
+	run_button.click(fn=stream_chat, inputs=[input_image, input_images, caption_type, caption_length, extra_options, name_input, custom_prompt, prefix_caption], outputs=[output_prompt, output_caption, download_packed])
 
 
 if __name__ == "__main__":
