@@ -161,7 +161,7 @@ image_adapter.to("cuda")
 @spaces.GPU()
 @torch.no_grad()
 def stream_chat(input_image: str, input_image_paths: list[str], caption_type: str, caption_length: str | int, extra_options: list[str], name_input: str, custom_prompt: str, prefix_caption: str, local_path: str) -> tuple[str, str, str]:
-	if input_image is None and (input_image_paths is None or len(input_image_paths) == 0):
+	if local_path is None or local_path == "" and (input_image is None and (input_image_paths is None or len(input_image_paths) == 0)):
 		return None, None, None
 
 	torch.cuda.empty_cache()
