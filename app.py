@@ -169,7 +169,7 @@ def stream_chat(input_image: str, input_image_paths: list[str], caption_type: st
 	if local_path is not None and local_path != "":
 		local_path = Path(local_path)
 		if not local_path.exists():
-			raise FileNotFoundError(f"Locale path {local_path} does not exist")
+			raise gr.Error(f"Locale path {local_path} does not exist")
 
 		input_images = []
 		for file in local_path.iterdir():
